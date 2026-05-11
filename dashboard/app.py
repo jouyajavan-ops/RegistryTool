@@ -5,6 +5,11 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+st.set_page_config(
+    page_title="Drawing Registry",
+    layout="wide"
+)
+
 BASE_PATH = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_PATH / "database" / "drawing_registry.db"
 LOGO_PATH = BASE_PATH / "assets" / "landmark_logo.png"
@@ -62,6 +67,32 @@ def ensure_schema():
     cursor = conn.cursor()
 
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS drawings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT DEFAULT 'Hinkler',
+            model_name TEXT,
+            sheet_number TEXT,
+            sheet_name TEXT,
+            current_revision TEXT,
+            revision_date TEXT,
+            revision_description TEXT,
+            issue_status TEXT,
+            assigned_to TEXT,
+            progress_status TEXT DEFAULT 'Not Started',
+            progress_percent INTEGER DEFAULT 0,
+            package_name TEXT,
+            regulated_required TEXT DEFAULT 'No',
+            regulated_rev TEXT,
+            regulated_date TEXT,
+            regulated_description TEXT,
+            regulated_dp_name TEXT,
+            regulated_dp_reg_no TEXT,
+            notes TEXT,
+            last_updated TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_name TEXT NOT NULL UNIQUE,
@@ -114,14 +145,25 @@ def ensure_schema():
 
     required_drawing_columns = {
         "project_name": "TEXT DEFAULT 'Hinkler'",
+        "model_name": "TEXT",
+        "sheet_number": "TEXT",
+        "sheet_name": "TEXT",
+        "current_revision": "TEXT",
+        "revision_date": "TEXT",
+        "revision_description": "TEXT",
+        "issue_status": "TEXT",
+        "assigned_to": "TEXT",
+        "progress_status": "TEXT DEFAULT 'Not Started'",
         "progress_percent": "INTEGER DEFAULT 0",
+        "package_name": "TEXT",
         "regulated_required": "TEXT DEFAULT 'No'",
         "regulated_rev": "TEXT",
         "regulated_date": "TEXT",
         "regulated_description": "TEXT",
         "regulated_dp_name": "TEXT",
         "regulated_dp_reg_no": "TEXT",
-        "notes": "TEXT"
+        "notes": "TEXT",
+        "last_updated": "TEXT"
     }
 
     for column_name, column_type in required_drawing_columns.items():
@@ -255,7 +297,8 @@ def update_drawing_row(row):
             progress_percent = ?,
             package_name = ?,
             regulated_required = ?,
-            notes = ?
+            notes = ?,
+            last_updated = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (
@@ -288,6 +331,8 @@ def working_days_until(target_date_text):
 
 
 def add_package_data(drawings_df, packages_df):
+    drawings_df = drawings_df.copy()
+
     package_date_map = {}
 
     if not packages_df.empty:
@@ -314,6 +359,23 @@ def add_package_data(drawings_df, packages_df):
     )
 
     return drawings_df
+
+
+def clean_progress_value(value):
+    try:
+        value = int(value)
+    except Exception:
+        return 0
+
+    if value < 0:
+        return 0
+
+    if value > 100:
+        return 100
+
+    closest_value = round(value / 10) * 10
+
+    return int(closest_value)
 
 
 def apply_text_search(df, search_text):
@@ -379,6 +441,17 @@ def metric_card(label, value):
         """.format(label, value),
         unsafe_allow_html=True
     )
+
+
+def progress_bar_html(value):
+    value = clean_progress_value(value)
+
+    return """
+    <div class="progress-wrapper">
+        <div class="progress-fill" style="width: {}%;"></div>
+        <div class="progress-text">{} percent</div>
+    </div>
+    """.format(value, value)
 
 
 def setup_styles(text_scale):
@@ -514,13 +587,41 @@ def setup_styles(text_scale):
             background-color: #e35213 !important;
             color: white !important;
         }}
+
+        .progress-wrapper {{
+            width: 100%;
+            height: 28px;
+            background-color: #edf0f3;
+            border-radius: 14px;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid rgba(16, 32, 51, 0.12);
+        }}
+
+        .progress-fill {{
+            height: 100%;
+            background-color: #e35213;
+            border-radius: 14px;
+        }}
+
+        .progress-text {{
+            position: absolute;
+            top: 4px;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            font-size: {small}px;
+            font-weight: 800;
+            color: #102033;
+        }}
         </style>
         """.format(
             base=base_size,
             table=table_size,
             title=title_size,
             metric=base_size + 22,
-            section=base_size + 10
+            section=base_size + 10,
+            small=max(base_size - 4, 11)
         ),
         unsafe_allow_html=True
     )
@@ -537,11 +638,6 @@ def render_top():
 
 ensure_schema()
 
-st.set_page_config(
-    page_title="Drawing Registry",
-    layout="wide"
-)
-
 text_scale = st.sidebar.slider(
     "Text Size",
     min_value=16,
@@ -557,6 +653,12 @@ projects_df = load_table("projects", "project_name")
 users_df = load_table("users", "user_name")
 packages_df = load_table("cc_packages", "project_name, target_issue_date")
 manual_items_df = load_table("manual_items", "project_name, due_date")
+
+if "progress_percent" in drawings_df.columns:
+    drawings_df["progress_percent"] = drawings_df["progress_percent"].apply(clean_progress_value)
+
+if "progress_percent" in manual_items_df.columns:
+    manual_items_df["progress_percent"] = manual_items_df["progress_percent"].apply(clean_progress_value)
 
 drawings_df = add_package_data(drawings_df, packages_df)
 
@@ -734,6 +836,9 @@ with tabs[0]:
 
     editor_df = filtered_df[editor_columns].copy()
 
+    if "progress_percent" in editor_df.columns:
+        editor_df["progress_percent"] = editor_df["progress_percent"].apply(clean_progress_value)
+
     package_options = packages_df[
         packages_df["project_name"] == selected_project
     ]["package_name"].dropna().unique().tolist()
@@ -758,25 +863,28 @@ with tabs[0]:
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "progress_status": st.column_config.SelectboxColumn(
                 "Status",
-                options=STATUS_OPTIONS
+                options=STATUS_OPTIONS,
+                required=False
             ),
-            "progress_percent": st.column_config.ProgressColumn(
-                "Progress",
-                min_value=0,
-                max_value=100,
-                format="%d percent"
+            "progress_percent": st.column_config.SelectboxColumn(
+                "Progress Percent",
+                options=PROGRESS_OPTIONS,
+                required=False
             ),
             "assigned_to": st.column_config.SelectboxColumn(
                 "Assigned To",
-                options=active_users
+                options=active_users,
+                required=False
             ),
             "package_name": st.column_config.SelectboxColumn(
                 "Package",
-                options=package_options
+                options=package_options,
+                required=False
             ),
             "regulated_required": st.column_config.SelectboxColumn(
                 "Regulated Required",
-                options=REGULATED_OPTIONS
+                options=REGULATED_OPTIONS,
+                required=False
             )
         }
     )
@@ -808,9 +916,19 @@ with tabs[0]:
                     if pd.isna(new_value):
                         new_value = ""
 
+                    if column == "progress_percent":
+                        old_value = clean_progress_value(old_value)
+                        new_value = clean_progress_value(new_value)
+
                     if str(old_value) != str(new_value):
                         row_data = edited_by_id.loc[row_id].to_dict()
                         row_data["id"] = row_id
+
+                        if "progress_percent" in row_data:
+                            row_data["progress_percent"] = clean_progress_value(
+                                row_data["progress_percent"]
+                            )
+
                         changed_rows.append(row_data)
                         break
 
@@ -1053,13 +1171,23 @@ with tabs[2]:
         "working_days_left"
     ]
 
+    display_task_drawings = user_drawings[
+        [column for column in task_columns if column in user_drawings.columns]
+    ].copy()
+
     st.dataframe(
-        user_drawings[
-            [column for column in task_columns if column in user_drawings.columns]
-        ],
+        display_task_drawings,
         use_container_width=True,
         hide_index=True,
-        height=360
+        height=360,
+        column_config={
+            "progress_percent": st.column_config.ProgressColumn(
+                "Progress",
+                min_value=0,
+                max_value=100,
+                format="%d percent"
+            )
+        }
     )
 
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1074,7 +1202,15 @@ with tabs[2]:
         user_manual_items,
         use_container_width=True,
         hide_index=True,
-        height=320
+        height=320,
+        column_config={
+            "progress_percent": st.column_config.ProgressColumn(
+                "Progress",
+                min_value=0,
+                max_value=100,
+                format="%d percent"
+            )
+        }
     )
 
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1131,6 +1267,19 @@ with tabs[3]:
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown(
+        '<div class="section-title">Overall Progress Bar</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        progress_bar_html(overall_progress),
+        unsafe_allow_html=True
+    )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown(
         '<div class="section-title">Status Breakdown</div>',
         unsafe_allow_html=True
     )
@@ -1168,7 +1317,15 @@ with tabs[3]:
         st.dataframe(
             package_progress,
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            column_config={
+                "Average Progress": st.column_config.ProgressColumn(
+                    "Average Progress",
+                    min_value=0,
+                    max_value=100,
+                    format="%d percent"
+                )
+            }
         )
 
         st.bar_chart(
